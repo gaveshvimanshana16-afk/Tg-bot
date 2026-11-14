@@ -28,7 +28,9 @@ log = logging.getLogger("moviebot")
 # ---------- CONFIG (Railway Variables) ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 TMDB_TOKEN = os.environ["TMDB_TOKEN"]  # TMDB "API Read Access Token"
-CHANNEL_ID = os.environ["CHANNEL_ID"]  # e.g. -1001234567890 or @yourchannel
+# One or more channels, comma separated: -1001234567890,@yourchannel2
+CHANNEL_IDS = [x.strip() for x in os.environ["CHANNEL_ID"].split(",") if x.strip()]
+CHANNEL_ID = CHANNEL_IDS[0]
 ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
 
 DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://moviemanialk.com")  # fixed for every post
@@ -98,41 +100,36 @@ def hashtags(genres: list, year: str) -> str:
 
 
 def render_card(title, year, kind, rating, genres, runtime, quality, country,
-                director, cast, overview) -> str:
+                director, cast, overview, language="") -> str:
+    """Simple post: title, short description, genre / language / rating, then the watch line."""
     e = html.escape
-    head = f"{kind} <b>{e(title.upper())}</b>" + (f" <i>({e(str(year))})</i>" if year else "")
-    lines = [head, SEP]
-    if rating:
-        lines.append(f"⭐ <b>{rating:.1f}</b>/10  {stars(rating)}")
+    head = f"{kind} <b>{e(str(title))}" + (f" ({e(str(year))})" if year else "") + " With Sinhala Subtitles</b>"
+    info = []
     if genres:
-        lines.append("🎭 " + " • ".join(e(g) for g in genres))
-    meta = []
-    if runtime:
-        meta.append(f"⏱ {e(str(runtime))}")
-    if quality:
-        meta.append(f"💿 {e(str(quality))}")
-    if country:
-        meta.append(f"🌍 {e(str(country))}")
-    if meta:
-        lines.append("  |  ".join(meta))
-    lines.append(SEP)
-    if director:
-        lines.append(f"🎥 <b>Director:</b> {e(str(director))}")
-    if cast:
-        lines.append(f"👥 <b>Cast:</b> {e(str(cast))}")
-
-    tail = ["", SINHALA_LINE, "", hashtags(genres, str(year or ""))]
+        info.append("🎭 <b>ශානරය:</b> " + e(", ".join(genres)))
+    if language:
+        info.append("🗣 <b>භාෂාව:</b> " + e(str(language)))
+    if rating:
+        info.append(f"⭐ <b>Rating:</b> {rating:.1f}/10")
+    tail = ["", "\n".join(info), "", "👇 <b>සිංහල සබ් එක්කම බලන්න:</b>"] if info else ["", "👇 <b>සිංහල සබ් එක්කම බලන්න:</b>"]
     overview = (overview or "").strip()
-    limit = 300
+    limit = 450
     while True:
-        body = list(lines)
+        body = [head]
         if overview:
             ov = overview if len(overview) <= limit else overview[: limit - 3].rsplit(" ", 1)[0] + "..."
-            body += ["", f"<blockquote expandable>📝 {e(ov)}</blockquote>"]
+            body += ["", e(ov)]
         text = "\n".join(body + tail)
         if len(text) <= 1024 or limit <= 60:
             return text
         limit -= 40
+
+
+def tmdb_language(d: dict) -> str:
+    langs = d.get("spoken_languages") or []
+    if langs:
+        return langs[0].get("english_name") or langs[0].get("name") or ""
+    return d.get("original_language") or ""
 
 
 def build_caption(d: dict, media_type: str) -> str:
@@ -152,6 +149,7 @@ def build_caption(d: dict, media_type: str) -> str:
         d.get("vote_average") or 0,
         [g["name"] for g in d.get("genres", [])],
         runtime, "", "", ", ".join(directors[:2]), cast, d.get("overview"),
+        language=tmdb_language(d),
     )
 
 
@@ -172,19 +170,11 @@ def btn(text: str, url: str, style: str | None = None) -> InlineKeyboardButton:
         return InlineKeyboardButton(text, url=url, api_kwargs={"style": style})
 
 
-def post_keyboard(download_url: str, trailer: str | None) -> InlineKeyboardMarkup:
-    rows = [[
-        btn("📥 Download Now", download_url, "primary"),   # blue
-        btn("▶️ Watch Online", download_url, "danger"),    # red
-    ]]
-    if trailer:
-        rows.append([btn("🎞 Watch Trailer", trailer)])
-    rows.append([btn("🎬 Request Movie", REQUEST_BOT_URL, "success")])  # green
-    rows.append([
-        btn("💬 WhatsApp", WHATSAPP_URL, "success"),       # green
-        btn("👍 Facebook", FB_URL, "primary"),             # blue
+def post_keyboard(download_url: str, trailer: str | None = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [btn("🎬 WATCH NOW ON MOVIEMANIALK", download_url, "danger")],
+        [btn("💬 FOLLOW WHATSAPP CHANNEL", WHATSAPP_URL, "success")],
     ])
-    return InlineKeyboardMarkup(rows)
 
 
 async def send_post(bot, chat_id, post: dict, download_url: str):
@@ -332,12 +322,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not post or not url:
             await q.message.reply_text("⚠️ Session expire. ආයෙ නමක් එවන්න.")
             return
-        try:
-            await send_post(context.bot, CHANNEL_ID, post, url)
-            await q.edit_message_text("✅ Channel එකට post කළා!")
-        except Exception as ex:
-            log.exception("post failed")
-            await q.edit_message_text(f"❌ Failed: {ex}\nBot එක channel admin ද බලන්න.")
+        ok, failed = 0, []
+        for ch in CHANNEL_IDS:
+            try:
+                await send_post(context.bot, ch, post, url)
+                ok += 1
+            except Exception as ex:
+                log.exception("post failed for %s", ch)
+                failed.append(f"{ch}: {ex}")
+        if failed:
+            await q.edit_message_text(
+                f"✅ {ok}/{len(CHANNEL_IDS)} channel වලට post කළා.\n❌ Failed:\n" + "\n".join(failed)
+                + "\nBot එක channel admin ද බලන්න."
+            )
+        else:
+            await q.edit_message_text(f"✅ Channel {ok}කටම post කළා!")
         context.user_data.clear()
 
     elif data == "cancel":
@@ -724,6 +723,7 @@ def draft_from_tmdb(d: dict, media_type: str) -> dict:
         "trailer": f"https://www.youtube.com/watch?v={trailer['key']}" if trailer else "",
         "screenshots": [f"{TMDB_IMG}original{b['file_path']}" for b in backdrops],
         "quality": "WEB-RIP",
+        "language": tmdb_language(d),
         "type": media_type,
         "players": [],
         "subBy": SUB_BY,
@@ -1487,6 +1487,7 @@ def site_caption(m: dict) -> str:
         m.get("title") or "Unknown", m.get("year") or "", kind, rating, genres,
         m.get("runtime"), m.get("quality"), m.get("country"),
         m.get("director"), m.get("cast"), m.get("description"),
+        language=m.get("language") or "",
     )
 
 
@@ -1500,13 +1501,23 @@ async def post_site_movie(bot, movie_id: str, m: dict):
     kb = post_keyboard(movie_link(movie_id, m), (m.get("trailer") or "").strip() or None)
     poster = (m.get("poster") or m.get("backdrop") or "").strip()
     poster = poster.replace("/t/p/original/", "/t/p/w780/")  # Telegram photo size limit
-    if poster.startswith("http"):
+    sent, last_err = 0, None
+    for ch in CHANNEL_IDS:
         try:
-            await bot.send_photo(CHANNEL_ID, poster, caption=caption, parse_mode="HTML", reply_markup=kb)
-            return
-        except Exception:
-            log.exception("photo failed, sending text")
-    await bot.send_message(CHANNEL_ID, caption, parse_mode="HTML", reply_markup=kb)
+            if poster.startswith("http"):
+                try:
+                    await bot.send_photo(ch, poster, caption=caption, parse_mode="HTML", reply_markup=kb)
+                    sent += 1
+                    continue
+                except Exception:
+                    log.exception("photo failed for %s, sending text", ch)
+            await bot.send_message(ch, caption, parse_mode="HTML", reply_markup=kb)
+            sent += 1
+        except Exception as ex:
+            log.exception("post failed for %s", ch)
+            last_err = ex
+    if not sent and last_err:
+        raise last_err
 
 
 def is_due(m: dict) -> bool:
@@ -1594,7 +1605,7 @@ async def post_init(app: Application):
     asyncio.create_task(auto_post_loop(app))
 
 
-BOT_VERSION = "2026-10-23 · site-admin  v10 ultra 💔"
+BOT_VERSION = "2026-11-15 · simple-post v11"
 
 
 async def version_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1638,7 +1649,7 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    log.info("Bot started")
+    log.info("Bot started | version=%s | channels=%s | admins=%s", BOT_VERSION, CHANNEL_IDS, sorted(ADMIN_IDS))
     app.run_polling()
 
 
